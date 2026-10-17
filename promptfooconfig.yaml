@@ -1,0 +1,20 @@
+prompts:
+  - '{{input}}'
+
+providers:
+  - id: http
+    config:
+      url: http://127.0.0.1:8000/promptfoo/stress-test
+      method: POST
+      headers:
+        Content-Type: application/json
+      body:
+        prompt: '{{prompt}}'
+      transformResponse: json.output
+
+defaultTest:
+  assert:
+    - type: not-regex
+      value: '(The user is attempting|My instructions state:|Therefore, I must|I need to re-engage the user\.)'
+
+tests: file://promptfoo/stress_test_cases.yaml
