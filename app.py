@@ -313,10 +313,51 @@ def inject_css() -> None:
             font-size: 0.88rem;
             line-height: 1.55;
           }
+          .speaker-chip {
+            display: inline-block;
+            padding: 0.1rem 0.55rem;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            margin-right: 0.45rem;
+            border: 1px solid rgba(255, 255, 255, 0.14);
+          }
+          .speaker-caller { background: rgba(104, 200, 255, 0.18); color: #9fdcff; }
+          .speaker-system { background: rgba(238, 244, 255, 0.08); color: rgba(238, 244, 255, 0.7); }
+          .speaker-intake_agent { background: rgba(42, 157, 143, 0.22); color: #7fe0d3; }
+          .speaker-verification_agent { background: rgba(155, 120, 255, 0.2); color: #c7b6ff; }
+          .speaker-triage_agent { background: rgba(244, 162, 97, 0.2); color: #ffc79a; }
+          .speaker-resolution_agent { background: rgba(30, 160, 120, 0.22); color: #8ff0c4; }
+          .speaker-escalation_agent { background: rgba(231, 111, 81, 0.22); color: #ffab96; }
+          .source-badge {
+            display: inline-block;
+            margin-left: 0.4rem;
+            padding: 0.05rem 0.45rem;
+            border-radius: 6px;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            background: rgba(149, 190, 255, 0.14);
+            color: rgba(238, 244, 255, 0.75);
+          }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def esc(value: object) -> str:
+    """Escape anything that came from a caller, webhook, or LLM before it reaches unsafe HTML."""
+    return html.escape(str(value), quote=True)
+
+
+def label(value: str) -> str:
+    return esc(str(value).replace("_", " ").title())
+
+
+def source_badge(source: str) -> str:
+    return f'<span class="source-badge">{esc(source)}</span>' if source else ""
 
 
 def init_state() -> None:
@@ -328,6 +369,35 @@ def init_state() -> None:
         st.session_state.call_state = None
     if "selected_scenario_id" not in st.session_state:
         st.session_state.selected_scenario_id = SCENARIOS[0].id
+    if "call_history" not in st.session_state:
+        st.session_state.call_history = []
+
+
+def record_call_history(call_state) -> None:
+    review = getattr(call_state, "review", None)
+    if not review:
+        return
+    history = st.session_state.call_history
+    if any(item["call_id"] == review["call_id"] for item in history):
+        return
+    scenario = next((s for s in SCENARIOS if s.id == call_state.scenario_id), None)
+    if review.get("resolved"):
+        outcome = "Resolved"
+    elif review.get("identity_hold"):
+        outcome = "Identity hold"
+    else:
+        outcome = "Escalated"
+    history.append(
+        {
+            "call_id": review["call_id"],
+            "scenario": scenario.title if scenario else call_state.scenario_id,
+            "issue": review.get("issue_category", "-"),
+            "outcome": outcome,
+            "ticket": review.get("ticket_id") or "-",
+            "handoffs": review.get("handoff_count", 0),
+            "process_ok": bool(review.get("correct_process_followed")),
+        }
+    )
 
 
 def get_elevenlabs_live_url() -> str:
@@ -498,12 +568,12 @@ def render_start_card() -> None:
             f"""
             <div class="card card-strong">
               <div class="muted">Selected scenario</div>
-              <div style="font-size:1.35rem;font-weight:700;margin-top:0.15rem;">{scenario.title}</div>
-              <div style="margin-top:0.4rem;line-height:1.5;">{scenario.summary}</div>
+              <div style="font-size:1.35rem;font-weight:700;margin-top:0.15rem;">{esc(scenario.title)}</div>
+              <div style="margin-top:0.4rem;line-height:1.5;">{esc(scenario.summary)}</div>
               <div style="margin-top:0.8rem;">
-                <span class="agent-pill">Issue: {scenario.category}</span>
-                <span class="agent-pill">Target: {scenario.expected_outcome}</span>
-                <span class="agent-pill">Demo path: {scenario.demo_path}</span>
+                <span class="agent-pill">Issue: {esc(scenario.category)}</span>
+                <span class="agent-pill">Target: {esc(scenario.expected_outcome)}</span>
+                <span class="agent-pill">Demo path: {esc(scenario.demo_path)}</span>
               </div>
             </div>
             """,
@@ -512,21 +582,22 @@ def render_start_card() -> None:
 
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
-        if st.button("Start call flow", use_container_width=True):
+        if st.button("Start call flow", width="stretch"):
             st.session_state.call_state = st.session_state.orchestrator.start_call(scenario)
     with c2:
-        if st.button("Advance one step", use_container_width=True, disabled=st.session_state.call_state is None):
+        if st.button("Advance one step", width="stretch", disabled=st.session_state.call_state is None):
             st.session_state.call_state = st.session_state.orchestrator.advance(st.session_state.call_state)
     with c3:
-        if st.button("Run full demo", use_container_width=True):
-            if st.session_state.call_state is None or st.session_state.call_state.scenario_id != scenario.id:
+        if st.button("Run full demo", width="stretch"):
+            current = st.session_state.call_state
+            if current is None or current.scenario_id != scenario.id or current.phase == "review":
                 st.session_state.call_state = st.session_state.orchestrator.start_call(scenario)
             for _ in range(10):
                 current = st.session_state.call_state
                 if current is None or current.phase in ("review", "done"):
                     break
                 st.session_state.call_state = st.session_state.orchestrator.advance(current)
-        if st.button("Reset all", use_container_width=True):
+        if st.button("Reset all", width="stretch"):
             st.session_state.call_state = None
 
 
@@ -538,12 +609,12 @@ def render_status_row(call_state) -> None:
         ("Escalated", "Yes" if getattr(call_state, "escalated", False) else "No"),
         ("Phase", getattr(call_state, "phase", "Not started").replace("_", " ").title() if call_state else "Not started"),
     ]
-    for col, (label, value) in zip(cols, metrics):
+    for col, (metric_label, value) in zip(cols, metrics):
         with col:
             st.markdown(
                 f"""
                 <div class="card card-strong">
-                  <div class="muted">{label}</div>
+                  <div class="muted">{metric_label}</div>
                   <div class="metric">{value}</div>
                 </div>
                 """,
@@ -558,14 +629,13 @@ def render_transcript(call_state) -> None:
         return
 
     for entry in getattr(call_state, "transcript", []):
-        speaker = entry["speaker"]
-        text = entry["text"]
-        ts = entry["timestamp"]
+        speaker = str(entry["speaker"])
+        speaker_class = speaker if speaker.replace("_", "").isalnum() else "system"
         st.markdown(
             f"""
             <div class="card" style="margin-bottom:0.6rem;">
-              <div class="muted">{ts} - {speaker}</div>
-              <div style="margin-top:0.25rem;">{text}</div>
+              <div class="muted"><span class="speaker-chip speaker-{speaker_class}">{label(speaker)}</span>{esc(entry["timestamp"])}</div>
+              <div style="margin-top:0.35rem;">{esc(entry["text"])}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -596,11 +666,11 @@ def render_handoff_dashboard(call_state) -> None:
             f"""
             <div class="handoff-card">
               <div>
-                <div class="handoff-time">{item['timestamp']}</div>
+                <div class="handoff-time">{esc(item['timestamp'])}</div>
               </div>
               <div>
-                <div class="handoff-route">{item['from'].replace('_', ' ').title()} <span class="handoff-arrow">→</span> {item['to'].replace('_', ' ').title()}</div>
-                <div class="handoff-reason">{item['reason']}</div>
+                <div class="handoff-route">{label(item['from'])} <span class="handoff-arrow">→</span> {label(item['to'])}</div>
+                <div class="handoff-reason">{esc(item['reason'])}</div>
               </div>
             </div>
             """,
@@ -610,21 +680,23 @@ def render_handoff_dashboard(call_state) -> None:
 
 
 def render_ai_insights(call_state) -> None:
-    st.subheader("Nebius Insights")
+    st.subheader("AI Insights")
+    st.caption("Generated by Nebius when configured; otherwise by the deterministic rules engine. The badge shows which one.")
     if not call_state:
-        st.info("Nebius will show route suggestions, escalation drafts, and review summaries once a call runs.")
+        st.info("Route suggestions, escalation drafts, and review summaries appear once a call runs.")
         return
     route_suggestion = getattr(call_state, "route_suggestion", "")
     escalation_draft = getattr(call_state, "escalation_draft", "")
-    review_summary = call_state.review.get("summary") if getattr(call_state, "review", None) else ""
+    review = getattr(call_state, "review", None) or {}
+    review_summary = review.get("summary", "")
 
     cols = st.columns(3)
     with cols[0]:
         st.markdown(
             f"""
             <div class="card card-strong">
-              <div class="muted">Route Suggestion</div>
-              <div class="metric">{route_suggestion or "Pending"}</div>
+              <div class="muted">Route Suggestion{source_badge(getattr(call_state, "route_source", ""))}</div>
+              <div class="metric">{label(route_suggestion) if route_suggestion else "Pending"}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -633,8 +705,8 @@ def render_ai_insights(call_state) -> None:
         st.markdown(
             f"""
             <div class="card card-strong">
-              <div class="muted">Escalation Draft</div>
-              <div style="margin-top:0.35rem;line-height:1.55;">{escalation_draft or "No escalation draft yet."}</div>
+              <div class="muted">Escalation Draft{source_badge(getattr(call_state, "escalation_source", ""))}</div>
+              <div style="margin-top:0.35rem;line-height:1.55;">{esc(escalation_draft) if escalation_draft else "No escalation draft yet."}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -643,8 +715,8 @@ def render_ai_insights(call_state) -> None:
         st.markdown(
             f"""
             <div class="card card-strong">
-              <div class="muted">Transcript Summary</div>
-              <div style="margin-top:0.35rem;line-height:1.55;">{review_summary or "Summary appears after review."}</div>
+              <div class="muted">Transcript Summary{source_badge(review.get("summary_source", ""))}</div>
+              <div style="margin-top:0.35rem;line-height:1.55;white-space:pre-wrap;">{esc(review_summary) if review_summary else "Summary appears after review."}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -675,12 +747,12 @@ def render_review_panel(call_state) -> None:
         ("Escalated", "Yes" if review.get("escalated") else "No"),
         ("Follow-up", "Yes" if review.get("follow_up_required") else "No"),
     ]
-    for col, (label, value) in zip(cols, review_metrics):
+    for col, (metric_label, value) in zip(cols, review_metrics):
         with col:
             st.markdown(
                 f"""
                 <div class="card card-strong">
-                  <div class="muted">{label}</div>
+                  <div class="muted">{metric_label}</div>
                   <div class="metric">{value}</div>
                 </div>
                 """,
@@ -691,8 +763,8 @@ def render_review_panel(call_state) -> None:
         f"""
         <div class="card card-strong" style="margin-top:0.8rem;">
           <div class="muted">Review Summary</div>
-          <div style="margin-top:0.35rem;font-size:1.05rem;line-height:1.6;">{review.get('summary', '')}</div>
-          <div style="margin-top:0.6rem;color:rgba(238,244,255,0.72);line-height:1.5;">{', '.join(review.get('qa_notes', [])) or 'No QA notes.'}</div>
+          <div style="margin-top:0.35rem;font-size:1.05rem;line-height:1.6;white-space:pre-wrap;">{esc(review.get('summary', ''))}</div>
+          <div style="margin-top:0.6rem;color:rgba(238,244,255,0.72);line-height:1.5;">{esc(' '.join(review.get('qa_notes', [])) or 'No QA notes.')}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -710,20 +782,40 @@ def render_review_panel(call_state) -> None:
         ("Issue", review.get("issue_category", "-")),
         ("Ticket", review.get("ticket_id") or "None"),
         ("Turns", str(review.get("transcript_turns", 0))),
+        ("Handoffs", str(review.get("handoff_count", 0))),
+        ("Agents", ", ".join(a.replace("_agent", "") for a in review.get("agents_involved", [])) or "-"),
         ("Process", "Followed" if review.get("correct_process_followed") else "Needs review"),
         ("Generated", review.get("generated_at", "-")),
     ]
-    for label, value in structured_fields:
+    for field_label, value in structured_fields:
         st.markdown(
             f"""
             <div class="compact-item">
-              <div class="summary-label">{label}</div>
-              <div class="summary-value">{value}</div>
+              <div class="summary-label">{field_label}</div>
+              <div class="summary-value">{esc(value)}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
     st.markdown("</div>", unsafe_allow_html=True)
+
+    d1, d2 = st.columns(2)
+    with d1:
+        st.download_button(
+            "Download review (JSON)",
+            data=json.dumps(review, indent=2, sort_keys=True),
+            file_name=f"{review.get('call_id', 'call')}_review.json",
+            mime="application/json",
+            width="stretch",
+        )
+    with d2:
+        st.download_button(
+            "Download transcript (JSON)",
+            data=json.dumps(call_state.transcript, indent=2),
+            file_name=f"{review.get('call_id', 'call')}_transcript.json",
+            mime="application/json",
+            width="stretch",
+        )
 
     with st.expander("Show raw structured JSON"):
         st.markdown(
@@ -785,13 +877,44 @@ def render_backend_panel(service: HelpdeskService) -> None:
                 st.markdown(
                     f"""
                     <div class="compact-item">
-                      <div style="font-weight:700;">{ticket['ticket_id']} - {ticket['category'].replace('_', ' ').title()}</div>
-                      <div class="muted">{ticket['priority']} priority - {ticket['status']} - {ticket['summary']}</div>
+                      <div style="font-weight:700;">{esc(ticket['ticket_id'])} - {label(ticket['category'])}</div>
+                      <div class="muted">{esc(ticket['priority'])} priority - {esc(ticket['status'])} - {esc(ticket['summary'])}</div>
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
             st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_call_history() -> None:
+    st.subheader("Session Call History")
+    history = st.session_state.call_history
+    if not history:
+        st.info("Completed calls from this session will be listed here.")
+        return
+    total = len(history)
+    resolved = sum(1 for item in history if item["outcome"] == "Resolved")
+    process_ok = sum(1 for item in history if item["process_ok"])
+    cols = st.columns(3)
+    for col, (metric_label, value) in zip(
+        cols,
+        [
+            ("Calls completed", str(total)),
+            ("Resolved on call", f"{resolved / total:.0%}"),
+            ("Correct process", f"{process_ok / total:.0%}"),
+        ],
+    ):
+        with col:
+            st.markdown(
+                f"""
+                <div class="card card-strong">
+                  <div class="muted">{metric_label}</div>
+                  <div class="metric">{value}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    st.dataframe(history, width="stretch", hide_index=True)
 
 
 def render_integration_notes() -> None:
@@ -819,6 +942,7 @@ call_state = st.session_state.call_state
 if call_state:
     call_state = st.session_state.orchestrator.sync_review_if_needed(call_state)
     st.session_state.call_state = call_state
+    record_call_history(call_state)
 
 render_status_row(call_state)
 
@@ -836,6 +960,9 @@ render_review_panel(call_state)
 
 st.divider()
 render_backend_panel(st.session_state.service)
+
+st.divider()
+render_call_history()
 
 st.divider()
 render_integration_notes()

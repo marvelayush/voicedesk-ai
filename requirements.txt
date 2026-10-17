@@ -1,5 +1,5 @@
 fastapi>=0.115
 uvicorn>=0.30
-streamlit>=1.37
+streamlit>=1.50
 langsmith>=0.8.8
 openpyxl>=3.1.5

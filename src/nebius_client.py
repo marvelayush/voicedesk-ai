@@ -264,7 +264,8 @@ class NebiusClient:
         try:
             with request.urlopen(req, timeout=20) as resp:
                 raw = resp.read().decode("utf-8")
-        except error.URLError:
+        except (error.URLError, OSError):
+            # URLError covers HTTP/DNS failures; OSError covers socket timeouts.
             return NebiusResult(text="", data=None)
 
         try:
@@ -272,11 +273,10 @@ class NebiusClient:
         except json.JSONDecodeError:
             return NebiusResult(text=raw, data=None)
 
-        content = (
-            parsed.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-        )
+        try:
+            content = parsed["choices"][0]["message"]["content"] or ""
+        except (KeyError, IndexError, TypeError):
+            return NebiusResult(text="", data=None, usage=parsed.get("usage") if isinstance(parsed, dict) else None)
         return NebiusResult(
             text=str(content),
             data=self._parse_json_like(str(content)),

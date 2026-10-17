@@ -1,0 +1,15 @@
+[project]
+name = "voicedesk-ai"
+version = "1.1.0"
+description = "Multi-agent, voice-driven employee IT support assistant (ElevenLabs + FastAPI + Streamlit)."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Ayush Narayan", email = "ayushnarayan870@gmail.com" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = [
+    # Raised inside the langsmith package on Python 3.13, not by this project.
+    "ignore:ast.Str is deprecated:DeprecationWarning",
+]

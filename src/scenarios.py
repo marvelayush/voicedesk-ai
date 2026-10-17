@@ -86,5 +86,21 @@ SCENARIOS = [
         resolveable=False,
         follow_up_required=True,
     ),
+    Scenario(
+        id="unverified_caller",
+        title="Urgent reset from a caller who fails verification",
+        summary="A caller claims to be a Finance employee but gives the wrong manager. The demo should refuse account changes and place an identity hold instead of opening a ticket.",
+        category="password_reset",
+        expected_outcome="Identity hold, no ticket",
+        demo_path="Verify (fail) -> identity hold",
+        employee_name="Jordan Lee",
+        employee_id="E1042",
+        department="Finance",
+        manager="Chris Walker",
+        issue_description="I'm locked out and need my password reset right now, I have a board meeting in ten minutes.",
+        runbook_key="password_reset",
+        resolveable=False,
+        follow_up_required=True,
+    ),
 ]
 

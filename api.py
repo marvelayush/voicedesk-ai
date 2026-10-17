@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -7,12 +8,17 @@ from pydantic import BaseModel, Field
 
 from src.promptfoo_harness import render_promptfoo_output
 from src.local_env import load_local_env
-from src.service import HelpdeskService, redact_internal_annotations
+from src.scenarios import SCENARIOS
+from src.service import HelpdeskService, classify_issue, redact_internal_annotations
 
 
 load_local_env()
 
-app = FastAPI(title="VoiceDesk AI API")
+app = FastAPI(
+    title="VoiceDesk AI API",
+    version="1.1.0",
+    description="Simulated helpdesk backend and ElevenLabs webhook targets for the VoiceDesk AI demo.",
+)
 service = HelpdeskService()
 
 
@@ -46,6 +52,24 @@ def health() -> dict[str, str]:
 def verify_employee(payload: EmployeeVerificationRequest) -> dict:
     data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
     return service.verify_employee(data)
+
+
+@app.get("/scenarios")
+def list_scenarios() -> list[dict[str, Any]]:
+    return [asdict(scenario) for scenario in SCENARIOS]
+
+
+@app.get("/runbooks/{key}")
+def get_runbook(key: str) -> dict[str, Any]:
+    steps = service.runbook_steps(key)
+    if not steps:
+        raise HTTPException(status_code=404, detail=f"no runbook named '{key}'")
+    return {"key": key, "steps": steps}
+
+
+@app.get("/tickets")
+def list_tickets(status: str | None = None) -> list[dict[str, Any]]:
+    return service.list_tickets(status)
 
 
 @app.get("/incidents/{category}")
@@ -167,8 +191,5 @@ def infer_issue_category(state: dict[str, Any], transcript: list[dict[str, str]]
             str(state.get("summary", "")),
             " ".join(turn.get("text", "") for turn in transcript),
         ]
-    ).lower()
-    for category in ("vpn", "mfa", "password_reset", "email", "billing"):
-        if category in text_blob:
-            return category
-    return "unknown"
+    )
+    return classify_issue(text_blob)

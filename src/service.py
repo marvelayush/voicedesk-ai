@@ -4,9 +4,23 @@ import itertools
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+from src.nebius_client import NebiusClient
 from src.scenarios import Scenario, SCENARIOS
+
+
+RUNBOOK_DIR = Path(__file__).resolve().parent.parent / "runbooks"
+
+# Keyword hints used when no LLM is configured. Order matters: the first match wins.
+_CATEGORY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("vpn", ("vpn", "remote access", "tunnel")),
+    ("mfa", ("mfa", "authenticator", "2fa", "two-factor", "approve sign-ins", "one-time code")),
+    ("password_reset", ("password", "locked out", "locked myself", "lockout", "account locked")),
+    ("email", ("outlook", "email", "mailbox", "inbox", "syncing")),
+    ("billing", ("billing", "invoice", "expense")),
+)
 
 
 def now_iso() -> str:
@@ -26,6 +40,35 @@ _INTERNAL_ANNOTATION_MARKERS = (
     "Therefore, I must",
     "I need to re-engage the user.",
 )
+
+
+def classify_issue(text: str) -> str:
+    """Deterministic keyword classifier used as the fallback for LLM routing."""
+    blob = str(text).lower()
+    for category, keywords in _CATEGORY_KEYWORDS:
+        if any(keyword in blob for keyword in keywords):
+            return category
+    return "unknown"
+
+
+def load_runbooks(directory: Path = RUNBOOK_DIR) -> dict[str, list[str]]:
+    """Read numbered steps from runbooks/*.md so the KB and the demo share one source."""
+    runbooks: dict[str, list[str]] = {}
+    if not directory.is_dir():
+        return runbooks
+    for path in sorted(directory.glob("*.md")):
+        steps = [
+            match.group(1).strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if (match := re.match(r"^\s*\d+\.\s+(.+)$", line))
+        ]
+        if steps:
+            runbooks[path.stem] = steps
+    return runbooks
+
+
+def transcript_to_text(transcript: list[dict[str, Any]]) -> str:
+    return "\n".join(f"{turn.get('speaker', 'unknown')}: {turn.get('text', '')}" for turn in transcript)
 
 
 def redact_internal_annotations(text: str) -> str:
@@ -49,13 +92,16 @@ class CallState:
     verification_notes: str = ""
     issue_category: str = ""
     route_suggestion: str = ""
+    route_source: str = ""
     incident_active: bool = False
     resolved: bool = False
     escalated: bool = False
+    identity_hold: bool = False
     ticket_id: str = ""
     follow_up_required: bool = False
     attempted_steps: list[str] = field(default_factory=list)
     escalation_draft: str = ""
+    escalation_source: str = ""
     review: dict[str, Any] = field(default_factory=dict)
     finished: bool = False
 
@@ -74,29 +120,7 @@ class HelpdeskService:
             "password_reset": {"active": False, "summary": "No active password reset incident."},
             "email": {"active": True, "summary": "Known Outlook sync outage affecting a subset of users."},
         }
-        self.runbooks = {
-            "vpn": [
-                "Confirm the user's VPN client is up to date.",
-                "Confirm the user is on the approved network profile.",
-                "Have the user disconnect and reconnect once.",
-                "If authentication still fails, escalate to network support.",
-            ],
-            "mfa": [
-                "Confirm the caller still has access to the recovery phone or email.",
-                "Walk through MFA device re-enrollment.",
-                "Have the user re-test sign-in once enrolled.",
-            ],
-            "password_reset": [
-                "Confirm the account is active.",
-                "Use the password reset recovery flow.",
-                "Ask the user to sign out and sign back in.",
-            ],
-            "email": [
-                "Confirm whether other users are affected.",
-                "Check for a known incident before troubleshooting locally.",
-                "If the outage is active, escalate to the collaboration team.",
-            ],
-        }
+        self.runbooks = load_runbooks()
         self._ticket_counter = itertools.count(1042)
         self.tickets: list[dict[str, Any]] = []
 
@@ -163,6 +187,11 @@ class HelpdeskService:
     def ticket_summary(self) -> list[dict[str, Any]]:
         return self.tickets[-5:]
 
+    def list_tickets(self, status: str | None = None) -> list[dict[str, Any]]:
+        if not status:
+            return list(self.tickets)
+        return [ticket for ticket in self.tickets if ticket.get("status") == status]
+
     def runbook_steps(self, key: str) -> list[str]:
         return self.runbooks.get(key, [])
 
@@ -171,8 +200,9 @@ class HelpdeskService:
 
 
 class CallOrchestrator:
-    def __init__(self, service: HelpdeskService) -> None:
+    def __init__(self, service: HelpdeskService, nebius: NebiusClient | None = None) -> None:
         self.service = service
+        self.nebius = nebius if nebius is not None else NebiusClient()
         self._call_counter = itertools.count(1)
 
     def start_call(self, scenario: Scenario) -> CallState:
@@ -200,11 +230,20 @@ class CallOrchestrator:
 
     def sync_review_if_needed(self, state: CallState) -> CallState:
         if state.phase == "review" and not state.review:
-            state.review = self.build_review_record(
+            review = self.build_review_record(
                 call_id=state.call_id,
                 transcript=state.transcript,
                 state=asdict(state),
             )
+            review["summary_source"] = "rules"
+            if self.nebius.enabled:
+                summary = self.nebius.summarize_transcript(
+                    transcript_to_text(state.transcript), fallback=review["summary"]
+                )
+                if summary and summary != review["summary"]:
+                    review["summary"] = summary
+                    review["summary_source"] = "nebius"
+            state.review = review
         return state
 
     @staticmethod
@@ -212,31 +251,52 @@ class CallOrchestrator:
         resolved = bool(state.get("resolved"))
         verified = bool(state.get("verified"))
         escalated = bool(state.get("escalated"))
+        identity_hold = bool(state.get("identity_hold"))
         follow_up_required = bool(state.get("follow_up_required"))
         issue_category = state.get("issue_category", "unknown")
-        correct_process = verified and (resolved or escalated)
+        ticket_id = state.get("ticket_id", "")
+        # An unverified caller is handled correctly when nothing account-changing happened.
+        correct_process = (verified and (resolved or escalated)) or (
+            not verified and not resolved and not ticket_id
+        )
         notes = []
         if not verified:
             notes.append("Verification was incomplete.")
+        if identity_hold:
+            notes.append("Identity hold applied: no account changes or tickets were made for an unverified caller.")
+        if not verified and ticket_id:
+            notes.append("A ticket was created without verified identity.")
         if escalated and not resolved:
             notes.append("Escalation was appropriate for the unresolved issue.")
         if resolved:
             notes.append("Caller was resolved during the session.")
         if follow_up_required:
             notes.append("Follow-up is required.")
-        summary = (
-            "Caller issue was resolved." if resolved else "Caller issue was not resolved and required escalation."
-        )
+        if resolved:
+            summary = "Caller issue was resolved."
+        elif identity_hold:
+            summary = "Caller could not be verified, so the request was held for identity confirmation."
+        else:
+            summary = "Caller issue was not resolved and required escalation."
+        agents_involved: list[str] = []
+        for turn in transcript:
+            speaker = str(turn.get("speaker", ""))
+            if speaker.endswith("_agent") and speaker not in agents_involved:
+                agents_involved.append(speaker)
         return {
             "call_id": call_id,
             "issue_category": issue_category,
             "employee_verified": verified,
             "resolved": resolved,
             "escalated": escalated,
+            "identity_hold": identity_hold,
             "correct_process_followed": correct_process,
             "follow_up_required": follow_up_required,
             "attempted_steps": state.get("attempted_steps", []),
-            "ticket_id": state.get("ticket_id", ""),
+            "ticket_id": ticket_id,
+            "route_suggestion": state.get("route_suggestion", ""),
+            "handoff_count": len(state.get("handoffs") or []),
+            "agents_involved": agents_involved,
             "qa_notes": notes,
             "summary": summary,
             "transcript_turns": len(transcript),
@@ -309,6 +369,17 @@ class CallOrchestrator:
     def _step_triage(self, state: CallState) -> None:
         scenario = scenario_by_id(state.scenario_id)
         state.issue_category = scenario.category
+        self._suggest_route(state)
+        if not state.verified:
+            self._append(
+                state,
+                "triage_agent",
+                "I can't make account changes until your identity is confirmed, so I'm placing this on an identity hold.",
+            )
+            state.identity_hold = True
+            state.follow_up_required = True
+            self._handoff(state, "triage", "escalation", "Caller unverified; identity hold before any account action.")
+            return
         incident = self.service.get_incident_status(scenario.category)
         state.incident_active = bool(incident["active"])
         if state.incident_active:
@@ -352,17 +423,65 @@ class CallOrchestrator:
         state.follow_up_required = True
         self._handoff(state, "resolution", "escalation", "Runbook did not resolve the issue.")
 
+    def _suggest_route(self, state: CallState) -> None:
+        caller_text = " ".join(turn["text"] for turn in state.transcript if turn["speaker"] == "caller")
+        fallback = classify_issue(caller_text)
+        state.route_suggestion = fallback
+        state.route_source = "rules"
+        if self.nebius.enabled:
+            suggestion = self.nebius.suggest_route(transcript_to_text(state.transcript), fallback=fallback)
+            if suggestion:
+                state.route_suggestion = suggestion
+                state.route_source = "nebius"
+
+    def _draft_escalation(self, state: CallState, scenario: Scenario, priority: str) -> None:
+        steps = "; ".join(state.attempted_steps) or "none"
+        incident = "active incident" if state.incident_active else "no active incident"
+        fallback = (
+            f"[{priority.upper()}] {scenario.category} issue for {scenario.employee_name} ({scenario.employee_id}). "
+            f"Reported: {scenario.issue_description} Steps tried: {steps}. Incident feed: {incident}."
+        )
+        state.escalation_draft = fallback
+        state.escalation_source = "rules"
+        if self.nebius.enabled:
+            draft = self.nebius.draft_escalation(transcript_to_text(state.transcript), asdict(state), fallback=fallback)
+            if draft and draft != fallback:
+                state.escalation_draft = draft
+                state.escalation_source = "nebius"
+
     def _step_escalation(self, state: CallState) -> None:
         scenario = scenario_by_id(state.scenario_id)
+        if state.identity_hold or not state.verified:
+            # Never open a ticket against an employee record we could not verify.
+            state.identity_hold = True
+            state.follow_up_required = True
+            state.escalation_draft = (
+                f"Identity hold: caller claiming to be {scenario.employee_name} failed verification. "
+                "Call back through a verified channel before taking any action."
+            )
+            state.escalation_source = "rules"
+            self._append(
+                state,
+                "escalation_agent",
+                "I've flagged this for the service desk. They'll contact you through a verified channel to confirm your identity first.",
+            )
+            state.phase = "review"
+            state.active_agent = "review"
+            self._append(state, "system", "Identity hold recorded. I'm moving to the post-call review.")
+            return
+
+        priority = "high" if state.incident_active else "medium"
+        self._draft_escalation(state, scenario, priority)
         ticket = self.service.create_ticket(
             {
                 "caller_name": scenario.employee_name,
                 "employee_id": scenario.employee_id,
                 "category": scenario.category,
                 "summary": scenario.issue_description,
-                "priority": "high" if state.incident_active else "medium",
-                "verification_status": "verified" if state.verified else "unverified",
+                "priority": priority,
+                "verification_status": "verified",
                 "attempted_steps": state.attempted_steps,
+                "escalation_notes": state.escalation_draft,
             }
         )
         state.ticket_id = ticket["ticket_id"]

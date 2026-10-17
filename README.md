@@ -1,281 +1,199 @@
 # VoiceDesk AI
 
-**Author:** Ayush Narayan (ayushnarayan870@gmail.com)
+[![tests](https://github.com/marvelayush/voicedesk-ai/actions/workflows/tests.yml/badge.svg)](https://github.com/marvelayush/voicedesk-ai/actions/workflows/tests.yml)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688)
+![Streamlit](https://img.shields.io/badge/Streamlit-dashboard-FF4B4B)
 
-VoiceDesk AI is a multi-agent, voice-driven employee IT support assistant. It shows a multi-agent employee IT support flow:
+**Author:** Ayush Narayan ([@marvelayush](https://github.com/marvelayush))
 
-- intake
-- verification
-- triage
-- resolution
-- escalation
-- post-call review
+VoiceDesk AI is a multi-agent, voice-driven IT support assistant for employees. A caller talks to an ElevenLabs voice agent. Specialist agents then take the call through **intake → verification → triage → resolution or escalation → post-call QA review**. A FastAPI backend simulates the helpdesk systems, and a Streamlit dashboard shows every handoff as it happens.
 
-It also includes a documented red-team stress test of the demo's guardrails and workflow boundaries.
+![Dashboard](assets/dashboard-1.jpg)
 
-ElevenLabs Conversational AI fits as the real-time voice layer. This repo provides:
+## Highlights
 
-- a simulated helpdesk backend
-- a structured call-state engine
-- a Streamlit demo dashboard
-- a small set of IT runbooks
-- API endpoints that ElevenLabs webhook tools can call
-- optional Nebius-powered summarization, routing support, QA review, and escalation drafting
+- **Multi-agent call flow.** Each stage is a separate agent, and every handoff records why it happened.
+- **Security-first routing.** Tickets are only created for verified callers. If a caller fails verification, the call goes on an *identity hold*: no account changes are made and no ticket is opened.
+- **Optional LLM layer.** With Nebius configured, an LLM suggests the route, drafts the escalation notes and summarizes the call. Without it, a deterministic rules engine does the same jobs. The dashboard shows which one produced each result.
+- **One source of truth for runbooks.** The markdown files in `runbooks/` are uploaded to the ElevenLabs knowledge base, and the backend reads the same files.
+- **Evaluated and red-teamed.** LangSmith LLM-as-judge evals cover intake routing, and a promptfoo regression suite covers prompt injection, jailbreaks, PII extraction and other attacks.
+- **Tested.** A pytest suite covers every scenario end to end, the guardrails and the API, and runs in CI on Python 3.11–3.13.
 
-## Evaluation
+## Architecture
 
-This repo now includes a LangSmith-backed evaluation setup for the Week 3 intake orchestrator.
+```mermaid
+flowchart LR
+    Caller[Employee caller] --> Intake[Intake agent]
+    Intake --> Verify[Verification agent]
+    Verify --> Triage[Triage agent]
 
-Artifacts:
+    Triage -->|Unverified| Hold[Identity hold]
+    Triage -->|Known incident| Escalate[Escalation agent]
+    Triage -->|Individual issue| Resolve[Resolution agent]
 
-- `docs/intake_routing_golden_dataset.xlsx`
-- `docs/evaluation.md`
-- LangSmith dataset: `intake-routing-golden-v1`
-- LangSmith project: `voicedesk-ai-intake-eval`
-- Eval runner: `scripts/langsmith_baseline.py`
+    Resolve -->|Resolved| Review[Post-call QA review]
+    Resolve -->|Not resolved| Escalate
+    Escalate --> Review
+    Hold --> Review
+    Review --> Dashboard[Streamlit dashboard]
 
-Current baseline metrics:
+    subgraph Backend["Simulated helpdesk (FastAPI)"]
+      Dir[Employee directory]
+      Inc[Incident feed]
+      Tix[Ticketing]
+      KB[Runbook KB]
+    end
 
-- route accuracy
-- intake hold safety
-- clarification quality
-- issue capture completeness
-- p50 latency
-- token usage
-- estimated cost
+    Verify -. lookup .-> Dir
+    Triage -. check .-> Inc
+    Escalate -. create .-> Tix
+    Resolve -. retrieve .-> KB
+```
 
-The evaluation now uses LLM-as-judge scoring for clarification quality and issue capture completeness on the full trace/conversation, while route correctness remains exact-match and deterministic.
+![Architecture diagram](assets/architecture-diagram.png)
 
-Run the baseline eval:
+## Demo scenarios
+
+| Scenario | Path | Expected outcome |
+| --- | --- | --- |
+| VPN failure after password reset | Verify → runbook → escalate | Ticket for network support |
+| MFA re-enrollment | Verify → runbook | Resolved on the call |
+| Locked account / password reset | Verify → runbook | Resolved on the call |
+| Outlook sync during active incident | Verify → triage → escalate | High-priority ticket; runbook skipped |
+| Urgent reset from unverified caller | Verify (fail) → identity hold | No ticket and no account changes |
+
+## Quick start
 
 ```bash
-py scripts/langsmith_baseline.py --mode llm
+git clone https://github.com/marvelayush/voicedesk-ai.git
+cd voicedesk-ai
+python -m venv .venv
+.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
+pip install -r requirements-dev.txt
 ```
 
-Use `--mode heuristic` only for smoke testing the wiring.
-
-See `docs/evaluation.md` for the current baseline snapshot and rerun instructions.
-See `docs/evaluation.md` for the full evaluation story, LLM-as-judge notes, and final results.
-
-## Stress Testing
-
-This repo also includes a red-team stress test of VoiceDesk AI, the multi-agent IT support voice assistant.
-
-Artifacts:
-
-- `docs/stress_test_demo_report.md`
-- `docs/promptfoo_stress_testing.md`
-- `Stress Test/`
-- `promptfooconfig.yaml`
-- `promptfoo/guardrail_target.py`
-- `promptfoo/stress_test_cases.yaml`
-
-The stress test covers:
-
-- prompt injection
-- jailbreaking
-- role override
-- authority pressure
-- PII extraction
-- tool / workflow abuse
-- obfuscation
-- crescendo
-
-The manual report documents the prompts tried, observed responses, screenshots, PASS/WARN/FAIL scores, and recommended guardrails or backend checks.
-
-Promptfoo adds a repeatable regression harness for the same attack families:
+Run the backend and the dashboard in two terminals:
 
 ```bash
-promptfoo eval -c promptfooconfig.yaml
+uvicorn api:app --reload        # http://localhost:8000/docs
+streamlit run app.py            # http://localhost:8501
 ```
 
-See [`docs/promptfoo_stress_testing.md`](docs/promptfoo_stress_testing.md) for the full setup and run instructions.
-Promptfoo requires Node.js; if `promptfoo` is not recognized, install Node.js first and then use either `npx promptfoo@latest eval -c promptfooconfig.yaml` or `npm install -g promptfoo`.
-
-For a quick visual recap, see the summary figure in `docs/stress_test_demo_report.md`.
-
-## Run locally
-
-Install dependencies:
+Run the tests:
 
 ```bash
-pip install -r requirements.txt
+pytest -q
 ```
 
-Start the simulated helpdesk API:
+Everything works offline. API keys only add the live voice and LLM features.
+
+## Configuration
+
+Copy the template and fill in only what you need:
 
 ```bash
-uvicorn api:app --reload
+copy .env.example .env          # macOS/Linux: cp .env.example .env
 ```
 
-Start the demo UI:
+| Variable | Purpose |
+| --- | --- |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` | Live voice agent |
+| `ELEVENLABS_WEB_VOICE_URL` | Browser session link shown in the dashboard |
+| `ELEVENLABS_WEBHOOK_URL` | Public URL of `/webhooks/elevenlabs/post-call` |
+| `NEBIUS_API_KEY`, `NEBIUS_MODEL`, `NEBIUS_BASE_URL` | LLM routing, summaries and escalation drafts |
+| `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT` | LangSmith evaluation runs |
 
-```bash
-streamlit run app.py
-```
+`.env` is loaded automatically and is git-ignored. Never commit real keys.
 
-Create a local `.env` file from the example template, then fill in your keys:
+## API
 
-```bash
-copy .env.example .env
-```
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/health` | Liveness check |
+| `POST` | `/employees/verify` | Verify a caller against the directory |
+| `GET` | `/incidents/{category}` | Check the incident feed |
+| `POST` | `/tickets` | Create a ticket (verified callers only) |
+| `GET` | `/tickets?status=open` | List tickets |
+| `GET` | `/scenarios` | List demo scenarios |
+| `GET` | `/runbooks/{key}` | Get runbook steps (`vpn`, `mfa`, `password_reset`, `email`) |
+| `POST` | `/webhooks/elevenlabs/post-call` | ElevenLabs post-call transcript → QA review |
+| `POST` | `/promptfoo/stress-test` | Guardrail target for promptfoo |
 
-Edit `.env` and add values like:
-
-```env
-ELEVENLABS_API_KEY=your_elevenlabs_key
-ELEVENLABS_AGENT_ID=your_elevenlabs_agent_id
-ELEVENLABS_WEBHOOK_URL=https://your-public-url/webhooks/elevenlabs/post-call
-ELEVENLABS_WEB_VOICE_URL=https://your-live-elevenlabs-browser-session-url
-
-NEBIUS_API_KEY=your_nebius_key
-NEBIUS_MODEL=your_nebius_model
-NEBIUS_BASE_URL=https://api.tokenfactory.nebius.com/v1
-```
-
-The app automatically loads `.env` when Streamlit and the API start, so you do not need to enter those values in the UI.
+Interactive docs are at `http://localhost:8000/docs`.
 
 ## ElevenLabs setup
 
-Set these environment variables before running the app:
+1. Register the endpoints above as webhook tools on your ElevenLabs agent.
+2. Upload `runbooks/*.md` to the agent's knowledge base and enable RAG.
+3. Use agent transfer for the escalation handoff.
+4. Point the post-call webhook at `/webhooks/elevenlabs/post-call`. For local testing, expose it with a tunnel such as ngrok.
 
-- `ELEVENLABS_API_KEY`
-- `ELEVENLABS_AGENT_ID`
-- `ELEVENLABS_WEBHOOK_URL`
-- `ELEVENLABS_WEB_VOICE_URL`
-
-Use the FastAPI endpoints as webhook targets for ElevenLabs tools:
-
-- `POST /employees/verify`
-- `GET /incidents/{category}`
-- `POST /tickets`
-- `POST /webhooks/elevenlabs/post-call`
-
-Upload the runbooks in `runbooks/` to the ElevenLabs knowledge base, then enable RAG on the agent.
-
-For the live voice flow, create an ElevenLabs agent that:
-
-- handles intake
-- calls the verification and ticket tools
-- uses the knowledge base for troubleshooting
-- transfers to escalation when needed
-
-Use this intake agent prompt pattern so it does not transfer too early:
+Use this intake prompt so the agent does not transfer before the caller has stated a problem:
 
 ```text
 You are the Intake Orchestrator for employee IT support.
 
 Goals:
-- Greet the employee warmly.
-- Ask the employee to describe the issue in their own words.
-- Do not transfer immediately after the greeting.
+- Greet the employee warmly and ask them to describe the issue in their own words.
 - Do not hand off until the employee has clearly stated their issue.
 - Ask at most one clarifying question if the issue is still ambiguous.
-- Only route to verification or triage after you have enough detail to identify the support path.
 - If the caller describes a known incident, route to escalation.
-- If the issue appears to be an individual problem, continue through verification and troubleshooting.
-- If the employee has not stated a problem yet, stay in intake and continue the conversation.
-- Do not make a routing decision based only on the greeting.
-- Do not infer the issue from the employee identity alone.
-- Wait for an explicit problem statement before any handoff.
+- If the issue is individual, continue through verification and troubleshooting.
+- Never route based on the greeting or the caller's identity alone.
 
-Style:
-- Be concise, calm, and professional.
-- Do not skip the intake step.
-- Do not hand off during the greeting turn.
-- Do not infer the problem before the employee speaks.
+Style: concise, calm, professional. Never skip intake.
 ```
 
-Routing guard to configure in ElevenLabs:
+If the agent still transfers too early, check its workflow transfer condition in ElevenLabs. The condition should depend on captured issue text, not the first assistant turn.
 
-- If the agent has not heard a clear issue statement, it must remain in intake.
-- If the agent only knows the employee name or greeting, it must ask a follow-up question instead of transferring.
-- If you are using a workflow or procedure, make the transfer step conditional on captured issue text, not on the first assistant turn.
-- Remove any automatic transfer rule that fires on the greeting alone.
+ElevenLabs blocks iframe embedding, so the dashboard opens the live voice session in a new tab.
 
-If the agent still transfers too early, the cause is almost certainly the agent workflow or transfer condition in ElevenLabs, not this repo.
+## Evaluation
 
-Set `ELEVENLABS_WEB_VOICE_URL` to the live browser session URL from ElevenLabs. The Streamlit app will show a launch panel for that session. ElevenLabs blocks iframe embedding for this page, so the live voice experience opens in a new tab instead of inside the Streamlit frame.
+The intake orchestrator is evaluated in LangSmith against a golden dataset (`docs/intake_routing_golden_dataset.xlsx`):
 
-The Streamlit app reads the ElevenLabs settings from the environment and shows them in the sidebar as read-only status. It remains the presentation layer for the demo and the post-call review.
+- route accuracy (exact match)
+- intake hold safety
+- clarification quality and issue capture completeness (LLM-as-judge on the full trace)
+- p50 latency, token usage and estimated cost
 
-## Nebius setup
-
-If you want backend AI assistance for routing, call summaries, QA review, and escalation drafting, set:
-
-- `NEBIUS_API_KEY`
-- `NEBIUS_MODEL`
-- `NEBIUS_BASE_URL`
-
-When those are present, the backend will use Nebius for:
-
-- transcript summarization
-- routing support
-- QA review
-- escalation drafting
-
-If the Nebius settings are empty, the app falls back to deterministic local logic.
-
-## Call Flow
-
-```mermaid
-flowchart LR
-    A[Caller] --> B[Intake Agent]
-    B --> C[Verification Agent]
-    C --> D[Triage Agent]
-
-    D -->|Known incident| E[Escalation Agent]
-    D -->|Individual issue| F[Resolution Agent]
-
-    F -->|Resolved| G[Post-Call Review]
-    F -->|Not resolved| E
-    E --> G
-
-    G --> H[Demo Dashboard]
-
-    subgraph Runtime["Runtime Layer"]
-      B
-      C
-      D
-      E
-      F
-      G
-    end
-
-    subgraph Backend["Simulated Backend + KB"]
-      I[Employee Directory]
-      J[Incident Feed]
-      K[Ticketing API]
-      L[Runbook Knowledge Base]
-    end
-
-    C -. lookup .-> I
-    D -. check .-> J
-    E -. create .-> K
-    F -. retrieve .-> L
+```bash
+python scripts/langsmith_baseline.py --mode llm        # --mode heuristic for a wiring smoke test
 ```
 
-At a glance:
+See [`docs/evaluation.md`](docs/evaluation.md) for results and analysis.
 
-- The caller enters through the voice experience.
-- Intake, verification, triage, resolution, and escalation are the active agents.
-- The post-call review stage produces the QA summary.
-- The demo dashboard shows the transcript, handoffs, and review outcome.
+## Red-team stress testing
 
-## Architecture
+The assistant was attacked with prompt injection, jailbreaking, role override, authority pressure, PII extraction, tool/workflow abuse, obfuscation and crescendo attacks. Screenshots and call logs are in `Stress Test/`, and the findings are in [`docs/stress_test_demo_report.md`](docs/stress_test_demo_report.md).
 
-```mermaid
-flowchart TB
-    Caller[Employee Caller] --> ElevenLabs[ElevenLabs Voice Agents]
-    ElevenLabs --> KB[Runbook Knowledge Base]
-    ElevenLabs --> API[FastAPI Helpdesk API]
-    API --> UI[Streamlit Demo App]
-    API --> Review[Post-Call Review]
+The same attack families run as a repeatable promptfoo suite (Node.js required):
+
+```bash
+uvicorn api:app                                   # target endpoint
+npx promptfoo@latest eval -c promptfooconfig.yaml
 ```
 
-This is the simplest way to think about the system:
+See [`docs/promptfoo_stress_testing.md`](docs/promptfoo_stress_testing.md).
 
-- ElevenLabs runs the live conversation and agent handoffs.
-- The FastAPI app simulates the helpdesk systems and receives the post-call webhook.
-- The Streamlit app presents the live demo and structured review.
-- The API endpoints behind the diagram are `POST /employees/verify`, `GET /incidents/{category}`, `POST /tickets`, and `POST /webhooks/elevenlabs/post-call`.
+## Project structure
+
+```
+api.py                 FastAPI helpdesk backend + webhooks
+app.py                 Streamlit dashboard
+src/
+  service.py           Call orchestrator, helpdesk service, QA review
+  scenarios.py         Demo scenarios
+  nebius_client.py     Optional LLM client (OpenAI-compatible)
+  intake_judges.py     LLM-as-judge prompts and parsing
+  promptfoo_harness.py Guardrail responses for red-team tests
+runbooks/              Knowledge base (shared by ElevenLabs and the backend)
+scripts/               Eval runner, dataset and documentation builders
+tests/                 pytest suite
+docs/                  Evaluation, stress-test reports, project documentation
+promptfoo/             Red-team test cases
+assets/                Screenshots and diagrams
+```
+
+The documentation builders run from the repo root, for example `python scripts/build_project_documentation.py`.
